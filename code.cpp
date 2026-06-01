@@ -51,16 +51,12 @@ bool buzzerState = false;
 unsigned long prevWiFiMillis = 0;
 const long wifiRetryInterval = 10000; 
 
-bool showingExpression = false;
-int expressionType = 1; 
-unsigned long expressionStartMillis = 0;
-const unsigned long expressionDuration = 5000; 
+bool showingSmiley = false;
+unsigned long smileyStartMillis = 0;
+const unsigned long smileyDuration = 5000; 
 
 unsigned long dataScreenDisplayStartMillis = 0;
 const unsigned long minimumDataDisplayDuration = 3000; 
-
-unsigned long lastTouchTime = 0;
-const unsigned long debounceDelay = 200; 
 
 int lastIrState = HIGH;
 int lastTouchState = LOW;
@@ -71,7 +67,6 @@ void runAutomationRules();
 void printSerialDebug();
 void drawDataTelemetryScreen();
 void drawAnimatedEyes();
-void drawAmazedEyes();
 
 void turnPumpOn() {
   pinMode(RELAY_PIN, OUTPUT);
@@ -95,7 +90,7 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
 
   pinMode(IR_PIN, INPUT_PULLUP);     
-  pinMode(TOUCH_PIN, INPUT); 
+  pinMode(TOUCH_PIN, INPUT_PULLDOWN); 
 
   turnPumpOff(); 
   digitalWrite(TRIG_PIN, LOW);
@@ -136,7 +131,7 @@ void setup() {
     server.begin();
   } else {
     isWiFiConnected = false;
-    Serial.println("\nWiFi Timeout. Offline mode active.");
+    Serial.println("\nWiFi Timeout. Running in offline automation mode. Background auto-healing active.");
   }
   
   lastIrState = digitalRead(IR_PIN);
@@ -158,12 +153,15 @@ void loop() {
     if (!isWiFiConnected) {
       isWiFiConnected = true;
       server.begin();
+      Serial.print("Wi-Fi Auto-Reconnected! Local IP: ");
+      Serial.println(WiFi.localIP());
     }
     server.handleClient(); 
   } else {
     isWiFiConnected = false;
     if (currentMillis - prevWiFiMillis >= wifiRetryInterval) {
       prevWiFiMillis = currentMillis;
+      Serial.println("Dashboard Disconnected. Re-polling access point in background...");
       WiFi.disconnect();
       WiFi.begin(ssid, password);
     }
@@ -185,54 +183,26 @@ void loop() {
   bool dataScreenHasShownLongEnough = (currentMillis - dataScreenDisplayStartMillis >= minimumDataDisplayDuration);
 
   bool irTriggered = (currentIrState == LOW && lastIrState == HIGH);
-  bool touchTriggered = false;
+  bool touchTriggered = (currentTouchState == HIGH && lastTouchState == LOW);
 
-  if (currentTouchState == HIGH && lastTouchState == LOW) {
-    if (currentMillis - lastTouchTime >= debounceDelay) {
-      touchTriggered = true;
-      lastTouchTime = currentMillis; 
-    }
+  if ((irTriggered || touchTriggered) && !showingSmiley && dataScreenHasShownLongEnough) {
+    showingSmiley = true;
+    smileyStartMillis = currentMillis; 
+    Serial.println(">> Human Proximity Detected! Animating OLED expressions.");
   }
 
   lastIrState = currentIrState;
   lastTouchState = currentTouchState;
 
-  if (irTriggered) {
-    if (!showingExpression && dataScreenHasShownLongEnough) {
-      showingExpression = true;
-      expressionType = 1; 
-      expressionStartMillis = currentMillis; 
-    } else if (showingExpression) {
-      expressionType = 1;
-      expressionStartMillis = currentMillis; 
-    }
-  }
-
-  if (touchTriggered) {
-    if (!showingExpression && dataScreenHasShownLongEnough) {
-      showingExpression = true;
-      expressionType = 2; 
-      expressionStartMillis = currentMillis; 
-      Serial.println(">> Touch Sensor Triggered: AMAZED Face");
-    } else if (showingExpression) {
-      expressionType = 2;
-      expressionStartMillis = currentMillis; 
-      Serial.println(">> Touch Sensor Refreshed: AMAZED Face");
-    }
-  }
-
-  if (showingExpression && (currentMillis - expressionStartMillis >= expressionDuration)) {
-    showingExpression = false; 
+  if (showingSmiley && (currentMillis - smileyStartMillis >= smileyDuration)) {
+    showingSmiley = false; 
     dataScreenDisplayStartMillis = currentMillis; 
+    Serial.println(">> Returning display window to environmental telemetry.");
   }
 
   display.clearDisplay();
-  if (showingExpression) {
-    if (expressionType == 1) {
-      drawAnimatedEyes(); 
-    } else {
-      drawAmazedEyes();   
-    }
+  if (showingSmiley) {
+    drawAnimatedEyes(); 
   } else {
     drawDataTelemetryScreen(); 
   }
@@ -242,10 +212,14 @@ void loop() {
 void readSensors() {
   float t = dht.readTemperature();
   float h = dht.readHumidity();
-  if (!isnan(t) && !isnan(h)) {
+  
+  if (isnan(t) || isnan(h)) {
+    Serial.println("Warning: DHT11 returned NaN. Check wiring.");
+  } else {
     temperature = t;
     humidity = h;
   }
+
   soilRaw = analogRead(SOIL_PIN);
 
   digitalWrite(TRIG_PIN, LOW);
@@ -264,7 +238,7 @@ void runAutomationRules() {
     isWaterAlarmActive = false; 
   } 
   else if (tankDistance >= TANK_EMPTY_CM) { 
-    waterStatusString = "TANK EMPTY!";
+    waterStatusString = "TANK EMPTY!"; 
     isWaterAlarmActive = true; 
   } 
   else { 
@@ -284,14 +258,18 @@ void drawDataTelemetryScreen() {
   display.setTextColor(WHITE);
   display.setCursor(0, 0);
   display.println("--- SMART PLANT ---");
+  
   display.print("Soil Moisture: "); display.println(soilRaw);
+  
   display.print("Room Temp    : "); display.print(temperature, 1); display.println(" C");
   display.print("Room Humid   : "); display.print(humidity, 1); display.println(" %");
+  
   if (tankDistance == -1.0) {
     display.println("Tank Level   : ERROR");
   } else {
     display.print("Tank Distance: "); display.print(tankDistance, 1); display.println(" cm");
   }
+  
   display.println("--------------------");
   display.print("Pump Status  : "); display.println(isPumpRunning ? "RUNNING" : "STANDBY");
 }
@@ -305,14 +283,6 @@ void drawAnimatedEyes() {
   display.fillRect(47, 34, 34, 8, BLACK); 
 }
 
-void drawAmazedEyes() {
-  display.drawCircle(38, 24, 11, WHITE);
-  display.fillCircle(38, 24, 3, WHITE); 
-  display.drawCircle(90, 24, 11, WHITE);
-  display.fillCircle(90, 24, 3, WHITE); 
-  display.drawCircle(64, 45, 7, WHITE);  
-}
-
 void printSerialDebug() {
   Serial.print("Moisture: "); Serial.print(soilRaw);
   Serial.print(" | Temp: "); Serial.print(temperature);
@@ -323,8 +293,10 @@ void printSerialDebug() {
 void handleRootPage() {
   int soilPercent = map(soilRaw, 4095, 1000, 0, 100);
   soilPercent = constrain(soilPercent, 0, 100);
+
   String tankBadgeClass = isWaterAlarmActive ? "bg-error-container text-error border-error" : "bg-primary-container text-on-primary-container border-primary";
   String tankDistanceString = (tankDistance == -1.0) ? "ERROR" : String(tankDistance, 1) + " cm";
+  
   String pumpBadgeClass = isPumpRunning ? "bg-primary text-on-primary border-primary font-bold" : "bg-surface-container-highest text-on-surface border-outline-variant";
   String pumpText = isPumpRunning ? "RUNNING" : "STANDBY";
 
@@ -392,10 +364,33 @@ void handleRootPage() {
                 "background": "#0f1511",
                 "surface-container": "#1c211d"
         },
-        "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
-        "spacing": { "gutter": "24px", "unit": "4px", "margin-desktop": "64px", "margin-mobile": "16px", "max-width": "1280px" },
-        "fontFamily": { "body-md": ["Work Sans"], "label-sm": ["Space Mono"], "display-lg": ["Syne"], "headline-lg-mobile": ["Syne"], "headline-lg": ["Syne"] },
-        "fontSize": { "body-md": ["16px", {"lineHeight": "1.6", "fontWeight": "400"}], "label-sm": ["12px", {"lineHeight": "1.2", "letterSpacing": "0.05em", "fontWeight": "500"}], "display-lg": ["56px", {"lineHeight": "1.1", "letterSpacing": "-0.02em", "fontWeight": "800"}], "headline-lg-mobile": ["28px", {"lineHeight": "1.2", "fontWeight": "700"}], "headline-lg": ["32px", {"lineHeight": "1.2", "fontWeight": "700"}] }
+        "borderRadius": {
+                "DEFAULT": "0.125rem",
+                "lg": "0.25rem",
+                "xl": "0.5rem",
+                "full": "0.75rem"
+        },
+        "spacing": {
+                "gutter": "24px",
+                "unit": "4px",
+                "margin-desktop": "64px",
+                "margin-mobile": "16px",
+                "max-width": "1280px"
+        },
+        "fontFamily": {
+                "body-md": ["Work Sans"],
+                "label-sm": ["Space Mono"],
+                "display-lg": ["Syne"],
+                "headline-lg-mobile": ["Syne"],
+                "headline-lg": ["Syne"]
+        },
+        "fontSize": {
+                "body-md": ["16px", {"lineHeight": "1.6", "fontWeight": "400"}],
+                "label-sm": ["12px", {"lineHeight": "1.2", "letterSpacing": "0.05em", "fontWeight": "500"}],
+                "display-lg": ["56px", {"lineHeight": "1.1", "letterSpacing": "-0.02em", "fontWeight": "800"}],
+                "headline-lg-mobile": ["28px", {"lineHeight": "1.2", "fontWeight": "700"}],
+                "headline-lg": ["32px", {"lineHeight": "1.2", "fontWeight": "700"}]
+        }
       }
     }
   }
@@ -413,6 +408,7 @@ void handleRootPage() {
 <header class="w-full py-8 text-center">
 <h1 class="text-display-lg font-display-lg text-primary tracking-tight">FloraHub</h1>
 </header>
+
 <div class="grid grid-cols-1 lg:grid-cols-12 gap-gutter">
 <div class="lg:col-span-7 bg-surface-container rounded-xl p-[32px] flex flex-col items-center justify-center neu-card relative overflow-hidden min-h-[400px]">
 <div class="absolute top-4 right-4 flex gap-2">
@@ -421,6 +417,7 @@ void handleRootPage() {
 </div>
 <img alt="Monstera plant in a smart pot" class="w-full max-w-[300px] object-contain drop-shadow-2xl z-10" src="https://lh3.googleusercontent.com/aida/ADBb0uh51BPAtUFpEwINQnSqy9nylVt-XIAHBKtCi-8DlmO7soAP2yJ6ucTdxR9J_IiH04Fmdjrjlm2nIqeNndDFR3qkglgytAyni51lzd-aJI9sBm-faOePb7HJmzfAMd5ydN_0qKdvH4bUAMve1S0rqd9sjLiAcncezodcaNewEP1AP2_jWbOUSEm-vUjiDzT-x861zceAm0PFw-j_9oVc-K6y1AVTYsRy6w2QXrqAlKI4IMceHaReex9TWA"/>
 </div>
+
 <div class="lg:col-span-5 flex flex-col gap-gutter">
 <div class="bg-surface rounded-xl p-[32px] neu-card flex-1 flex flex-col border border-transparent">
 <div class="flex items-center gap-2 mb-6 border-b-2 border-primary-fixed-dim pb-2">
@@ -438,6 +435,7 @@ void handleRootPage() {
 </div>
 </div>
 </div>
+
 <div class="bg-surface rounded-xl p-[32px] neu-card flex-1 flex flex-col border border-transparent">
 <div class="flex items-center gap-2 mb-6 border-b-2 border-primary-fixed-dim pb-2">
 <span class="material-symbols-outlined text-primary" data-icon="grass">grass</span>
@@ -453,6 +451,7 @@ void handleRootPage() {
 </div>
 </div>
 </div>
+
 <div class="grid grid-cols-1 md:grid-cols-2 gap-gutter mt-4">
 <div class="bg-surface rounded-xl p-[32px] neu-card border border-transparent">
 <div class="flex items-center gap-2 mb-6 border-b-2 border-primary-fixed-dim pb-2">
@@ -467,6 +466,7 @@ void handleRootPage() {
 </div>
 </div>
 </div>
+
 <div class="bg-surface-container rounded-xl p-[32px] border-4 border-primary shadow-[5px_5px_0px_#4ade80]">
 <div class="flex items-center gap-2 mb-6 border-b-2 border-primary pb-2">
 <span class="material-symbols-outlined text-primary" data-icon="settings">settings</span>
@@ -480,7 +480,7 @@ void handleRootPage() {
 </div>
 </main>
 </body></html>
-)=====";
+  )=====";
 
   html.replace("%TEMPERATURE%", String(temperature, 1));
   html.replace("%HUMIDITY%", String(humidity, 1));
